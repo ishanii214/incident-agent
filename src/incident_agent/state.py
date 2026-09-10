@@ -6,6 +6,7 @@ from incident_agent.executor import ToolResult
 from incident_agent.investigator import Hypothesis
 from incident_agent.models import Incident
 from incident_agent.planner import InvestigationPlan, PlannedTask
+from incident_agent.verifier import VerificationResult
 
 
 class InvestigationState(TypedDict):
@@ -17,6 +18,6 @@ class InvestigationState(TypedDict):
     completed_tasks: list[PlannedTask]
     evidence: list[ToolResult]
     hypotheses: list[Hypothesis]
-    verification: str | None
+    verification: VerificationResult | None
     retry_count: int
     final_result: str | None

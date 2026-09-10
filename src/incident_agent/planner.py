@@ -38,6 +38,12 @@ Rules:
 - For deployments, use since (about 2 hours before started_at).
 - Output ONLY the structured plan. No prose, no conclusions.
 
+Replanning (only when a verification failure context is provided):
+- You receive already-completed tasks and the verifier's missing information.
+- Do NOT repeat already-completed tasks.
+- Target the missing information with the smallest relevant set of additional
+  read-only tasks.
+
 You MUST NOT: diagnose the incident, name a root cause or version, predict
 what tools will return, execute tools, emit shell or Python code, access the
 filesystem or network, invent services/metrics/tools, or include extra fields.
@@ -112,16 +118,51 @@ class PlannerValidationError(ValueError):
     """Raised when an LLM-produced plan fails incident policy checks."""
 
 
-def planner_messages(incident: Incident) -> list[tuple[str, str]]:
-    """Render fixed system prompt plus mechanical incident message."""
-    human = (
-        f"id: {incident.id}\n"
-        f"service: {incident.service}\n"
-        f"symptom: {incident.symptom}\n"
-        f"started_at: {incident.started_at.isoformat()}\n"
-        "Produce the InvestigationPlan."
-    )
-    return [("system", PLANNER_SYSTEM_PROMPT), ("human", human)]
+class ReplanContext(BaseModel, extra="forbid"):
+    """Primitive context handed to the planner on a replan cycle."""
+
+    retry_count: int
+    verification_status: str | None = None
+    missing_information: list[str] = Field(default_factory=list)
+
+
+def dedupe_tasks(
+    plan_tasks: list[PlannedTask], completed: list[PlannedTask]
+) -> list[PlannedTask]:
+    """Ordered equality-based dedupe: within-plan and against completed.
+
+    Uses PlannedTask field equality only (no hashing). First occurrence wins.
+    """
+    out: list[PlannedTask] = []
+    for task in plan_tasks:
+        if task in completed or task in out:
+            continue
+        out.append(task)
+    return out
+
+
+def planner_messages(
+    incident: Incident,
+    completed_tasks: list[PlannedTask] | None = None,
+    replan: ReplanContext | None = None,
+) -> list[tuple[str, str]]:
+    """Render fixed system prompt plus incident and optional replan context."""
+    lines = [
+        f"id: {incident.id}",
+        f"service: {incident.service}",
+        f"symptom: {incident.symptom}",
+        f"started_at: {incident.started_at.isoformat()}",
+    ]
+    if completed_tasks:
+        lines.append("already completed tasks:")
+        for task in completed_tasks:
+            lines.append(f"- tool={task.tool} service={task.service}")
+    if replan is not None:
+        lines.append(f"verification status: {replan.verification_status}")
+        if replan.missing_information:
+            lines.append("missing information: " + "; ".join(replan.missing_information))
+    lines.append("Produce the InvestigationPlan.")
+    return [("system", PLANNER_SYSTEM_PROMPT), ("human", "\n".join(lines))]
 
 
 def enforce_plan_policy(plan: InvestigationPlan, incident: Incident) -> InvestigationPlan:
@@ -141,13 +182,20 @@ def enforce_plan_policy(plan: InvestigationPlan, incident: Incident) -> Investig
     return plan
 
 
-def run_planner(incident: Incident, _llm: Any | None = None) -> InvestigationPlan:
+def run_planner(
+    incident: Incident,
+    completed_tasks: list[PlannedTask] | None = None,
+    replan: ReplanContext | None = None,
+    _llm: Any | None = None,
+) -> InvestigationPlan:
     """Produce validated plan via LLM structured output (lazy construction)."""
     if _llm is None:
         from langchain_ollama import ChatOllama
 
         _llm = ChatOllama(model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"), temperature=0)
-    plan = _llm.with_structured_output(InvestigationPlan).invoke(planner_messages(incident))
+    plan = _llm.with_structured_output(InvestigationPlan).invoke(
+        planner_messages(incident, completed_tasks or [], replan)
+    )
     if not isinstance(plan, InvestigationPlan):
         plan = InvestigationPlan.model_validate(plan)
     return enforce_plan_policy(plan, incident)
