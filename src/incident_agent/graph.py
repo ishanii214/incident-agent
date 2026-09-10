@@ -1,19 +1,20 @@
-"""Deterministic LangGraph orchestration skeleton.
+"""LangGraph investigation workflow with an LLM-powered planner.
 
-Node bodies are placeholders only. They prove state flows through the graph in
-order and claim nothing about any incident's cause.
+Only the planner uses an LLM. All other nodes remain deterministic
+placeholders and perform no tool execution or diagnosis.
 """
 
 from langgraph.graph import END, START, StateGraph
 
+from incident_agent.planner import run_planner
 from incident_agent.state import InvestigationState
 
 
-def planner(state: InvestigationState) -> dict:
-    """Create a generic incident-derived task list."""
-    service = state["incident"].service
-    plan = [f"check-metrics:{service}", f"check-logs:{service}", f"check-deployments:{service}"]
-    return {"plan": plan, "pending_tasks": list(plan)}
+def planner(state: InvestigationState, _planner_fn=None) -> dict:  # type: ignore[no-untyped-def]
+    """Produce a validated structured plan from the incident via LLM."""
+    plan_fn = _planner_fn or run_planner
+    plan = plan_fn(state["incident"])
+    return {"plan": plan, "pending_tasks": list(plan.tasks)}
 
 
 def execute_task(state: InvestigationState) -> dict:
@@ -30,7 +31,7 @@ def collect_evidence(state: InvestigationState) -> dict:
     seen = set(state["evidence"])
     markers = []
     for task in state["completed_tasks"]:
-        marker = f"evidence:{task}"
+        marker = f"evidence:{task.tool}:{task.service}"
         if marker not in seen:
             seen.add(marker)
             markers.append(marker)
@@ -51,10 +52,13 @@ def verify(state: InvestigationState) -> dict:
     return {"verification": "failed", "final_result": "skeleton-incomplete"}
 
 
-def build_graph():  # type: ignore[no-untyped-def]
+def build_graph(_planner_fn=None):  # type: ignore[no-untyped-def]
     """Build and compile the linear investigation graph."""
+    from functools import partial
+
     builder = StateGraph(InvestigationState)
-    builder.add_node("planner", planner)
+    planner_node = partial(planner, _planner_fn=_planner_fn) if _planner_fn else planner
+    builder.add_node("planner", planner_node)
     builder.add_node("execute_task", execute_task)
     builder.add_node("collect_evidence", collect_evidence)
     builder.add_node("investigate", investigate)

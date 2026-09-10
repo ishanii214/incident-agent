@@ -1,9 +1,10 @@
-"""Phase 2 checks for the deterministic LangGraph skeleton."""
+"""Phase 3 graph checks with injected fake planner (no Ollama required)."""
 
 from datetime import datetime
 
 from incident_agent.graph import build_graph
 from incident_agent.models import Incident
+from incident_agent.planner import InvestigationPlan, PlannedTask
 
 
 def _incident() -> Incident:
@@ -15,10 +16,37 @@ def _incident() -> Incident:
     )
 
 
+def _fake_plan() -> InvestigationPlan:
+    return InvestigationPlan(
+        tasks=[
+            PlannedTask(
+                tool="get_metrics",
+                service="checkout",
+                metric="p95_latency_ms",
+                start=datetime.fromisoformat("2026-09-10T13:50:00+00:00"),
+                end=datetime.fromisoformat("2026-09-10T14:05:00+00:00"),
+            ),
+            PlannedTask(
+                tool="search_logs",
+                service="checkout",
+                start=datetime.fromisoformat("2026-09-10T13:50:00+00:00"),
+                end=datetime.fromisoformat("2026-09-10T14:05:00+00:00"),
+                keyword="timeout",
+                level="ERROR",
+            ),
+        ]
+    )
+
+
+def _fake_planner(incident: Incident) -> InvestigationPlan:
+    assert incident.id == "inc-001"
+    return _fake_plan()
+
+
 def _initial_state() -> dict:
     return {
         "incident": _incident(),
-        "plan": [],
+        "plan": None,
         "pending_tasks": [],
         "completed_tasks": [],
         "evidence": [],
@@ -30,12 +58,17 @@ def _initial_state() -> dict:
 
 
 def _serializable(result: dict) -> dict:
-    return {
-        **result,
-        "incident": result["incident"].model_dump(mode="json")
-        if isinstance(result["incident"], Incident)
-        else result["incident"],
-    }
+    dumped = dict(result)
+    if isinstance(result["incident"], Incident):
+        dumped["incident"] = result["incident"].model_dump(mode="json")
+    if isinstance(result.get("plan"), InvestigationPlan):
+        dumped["plan"] = result["plan"].model_dump(mode="json")
+    for key in ("pending_tasks", "completed_tasks"):
+        dumped[key] = [
+            item.model_dump(mode="json") if isinstance(item, PlannedTask) else item
+            for item in result[key]
+        ]
+    return dumped
 
 
 def test_graph_compiles() -> None:
@@ -43,7 +76,7 @@ def test_graph_compiles() -> None:
 
 
 def test_graph_runs_incident_to_terminal_state() -> None:
-    result = build_graph().invoke(_initial_state())
+    result = build_graph(_planner_fn=_fake_planner).invoke(_initial_state())
 
     assert set(result) == {
         "incident",
@@ -57,9 +90,14 @@ def test_graph_runs_incident_to_terminal_state() -> None:
         "final_result",
     }
     assert result["incident"] == _incident()
-    assert result["completed_tasks"] == ["check-metrics:checkout"]
-    assert result["pending_tasks"] == ["check-logs:checkout", "check-deployments:checkout"]
-    assert result["evidence"] == ["evidence:check-metrics:checkout"]
+    assert isinstance(result["plan"], InvestigationPlan)
+    assert [task.tool for task in result["plan"].tasks] == ["get_metrics", "search_logs"]
+    assert all(isinstance(task, PlannedTask) for task in result["pending_tasks"])
+    assert all(isinstance(task, PlannedTask) for task in result["completed_tasks"])
+    assert result["completed_tasks"][0].tool == "get_metrics"
+    assert result["completed_tasks"][0].service == "checkout"
+    assert len(result["pending_tasks"]) == len(result["plan"].tasks) - 1
+    assert result["evidence"] == ["evidence:get_metrics:checkout"]
     assert result["hypotheses"] == ["placeholder-hypothesis-1"]
     assert result["verification"] == "passed"
     assert result["final_result"] == "skeleton-complete"
@@ -67,13 +105,13 @@ def test_graph_runs_incident_to_terminal_state() -> None:
 
 
 def test_graph_is_deterministic() -> None:
-    graph = build_graph()
+    graph = build_graph(_planner_fn=_fake_planner)
 
     assert _serializable(graph.invoke(_initial_state())) == _serializable(graph.invoke(_initial_state()))
 
 
 def test_graph_leaks_no_verdict_or_remote_calls() -> None:
-    result = build_graph().invoke(_initial_state())
+    result = build_graph(_planner_fn=_fake_planner).invoke(_initial_state())
     payload = str(_serializable(result)).lower()
 
     assert "root_cause" not in payload
@@ -83,8 +121,14 @@ def test_graph_leaks_no_verdict_or_remote_calls() -> None:
     assert "answer" not in payload.replace("placeholder-hypothesis-1", "")
 
     import incident_agent.graph as graph_module
+    import incident_agent.planner as planner_module
 
-    source = open(graph_module.__file__, encoding="utf-8").read()
-    assert "incident_agent.tools" not in source
-    assert "ToolNode" not in source
-    assert "urllib" not in source and "socket" not in source and "requests" not in source
+    graph_source = open(graph_module.__file__, encoding="utf-8").read()
+    planner_source = open(planner_module.__file__, encoding="utf-8").read()
+    assert "incident_agent.tools" not in graph_source
+    assert "incident_agent.tools" not in planner_source
+    assert "ToolNode" not in graph_source
+    assert "urllib" not in graph_source and "socket" not in graph_source
+    assert "requests" not in graph_source and "subprocess" not in graph_source
+    assert "v2.4.1" not in planner_source and "payments" not in planner_source.lower()
+

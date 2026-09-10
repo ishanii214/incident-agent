@@ -3,15 +3,16 @@
 from typing import TypedDict
 
 from incident_agent.models import Incident
+from incident_agent.planner import InvestigationPlan, PlannedTask
 
 
 class InvestigationState(TypedDict):
     """Single source of truth for one investigation run."""
 
     incident: Incident
-    plan: list[str]
-    pending_tasks: list[str]
-    completed_tasks: list[str]
+    plan: InvestigationPlan | None
+    pending_tasks: list[PlannedTask]
+    completed_tasks: list[PlannedTask]
     evidence: list[str]
     hypotheses: list[str]
     verification: str | None
