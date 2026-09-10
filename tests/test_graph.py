@@ -1,7 +1,8 @@
-"""Phase 3 graph checks with injected fake planner (no Ollama required)."""
+"""Phase 4 graph checks with injected fake planner (no Ollama required)."""
 
 from datetime import datetime
 
+from incident_agent.executor import ToolResult
 from incident_agent.graph import build_graph
 from incident_agent.models import Incident
 from incident_agent.planner import InvestigationPlan, PlannedTask
@@ -58,6 +59,8 @@ def _initial_state() -> dict:
 
 
 def _serializable(result: dict) -> dict:
+    from incident_agent.executor import ToolResult
+
     dumped = dict(result)
     if isinstance(result["incident"], Incident):
         dumped["incident"] = result["incident"].model_dump(mode="json")
@@ -68,6 +71,10 @@ def _serializable(result: dict) -> dict:
             item.model_dump(mode="json") if isinstance(item, PlannedTask) else item
             for item in result[key]
         ]
+    dumped["evidence"] = [
+        item.model_dump(mode="json") if isinstance(item, ToolResult) else item
+        for item in result["evidence"]
+    ]
     return dumped
 
 
@@ -97,7 +104,10 @@ def test_graph_runs_incident_to_terminal_state() -> None:
     assert result["completed_tasks"][0].tool == "get_metrics"
     assert result["completed_tasks"][0].service == "checkout"
     assert len(result["pending_tasks"]) == len(result["plan"].tasks) - 1
-    assert result["evidence"] == ["evidence:get_metrics:checkout"]
+    assert len(result["evidence"]) == 1
+    assert isinstance(result["evidence"][0], ToolResult)
+    assert result["evidence"][0].task.tool == "get_metrics"
+    assert len(result["evidence"][0].metrics) >= 5
     assert result["hypotheses"] == ["placeholder-hypothesis-1"]
     assert result["verification"] == "passed"
     assert result["final_result"] == "skeleton-complete"
@@ -125,8 +135,13 @@ def test_graph_leaks_no_verdict_or_remote_calls() -> None:
 
     graph_source = open(graph_module.__file__, encoding="utf-8").read()
     planner_source = open(planner_module.__file__, encoding="utf-8").read()
+    import incident_agent.executor as executor_module
+
+    executor_source = open(executor_module.__file__, encoding="utf-8").read()
     assert "incident_agent.tools" not in graph_source
     assert "incident_agent.tools" not in planner_source
+    assert "incident_agent.executor" in graph_source
+    assert "getattr" not in executor_source and "subprocess" not in executor_source
     assert "ToolNode" not in graph_source
     assert "urllib" not in graph_source and "socket" not in graph_source
     assert "requests" not in graph_source and "subprocess" not in graph_source

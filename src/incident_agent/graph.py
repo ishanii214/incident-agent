@@ -1,11 +1,12 @@
-"""LangGraph investigation workflow with an LLM-powered planner.
+"""LangGraph investigation workflow with LLM planner and tool execution.
 
-Only the planner uses an LLM. All other nodes remain deterministic
-placeholders and perform no tool execution or diagnosis.
+The planner uses an LLM. execute_task deterministically dispatches validated
+tasks to read-only operational tools. Other nodes remain placeholders.
 """
 
 from langgraph.graph import END, START, StateGraph
 
+from incident_agent.executor import execute_planned_task
 from incident_agent.planner import run_planner
 from incident_agent.state import InvestigationState
 
@@ -18,24 +19,24 @@ def planner(state: InvestigationState, _planner_fn=None) -> dict:  # type: ignor
 
 
 def execute_task(state: InvestigationState) -> dict:
-    """Consume exactly one pending task, FIFO."""
+    """Execute exactly one pending task and store its typed result."""
     pending = list(state["pending_tasks"])
     completed = list(state["completed_tasks"])
-    if pending:
-        completed.append(pending.pop(0))
-    return {"pending_tasks": pending, "completed_tasks": completed}
+    evidence = list(state["evidence"])
+    if not pending:
+        return {"pending_tasks": pending, "completed_tasks": completed}
+    task = pending.pop(0)
+    result = execute_planned_task(task)
+    return {
+        "pending_tasks": pending,
+        "completed_tasks": [*completed, task],
+        "evidence": [*evidence, result],
+    }
 
 
 def collect_evidence(state: InvestigationState) -> dict:
-    """Record one generic marker per completed task."""
-    seen = set(state["evidence"])
-    markers = []
-    for task in state["completed_tasks"]:
-        marker = f"evidence:{task.tool}:{task.service}"
-        if marker not in seen:
-            seen.add(marker)
-            markers.append(marker)
-    return {"evidence": [*state["evidence"], *markers]}
+    """Explicit stage kept for Phase 5; execute_task already stores results."""
+    return {}
 
 
 def investigate(state: InvestigationState) -> dict:
