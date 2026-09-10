@@ -3,6 +3,7 @@
 from typing import TypedDict
 
 from incident_agent.executor import ToolResult
+from incident_agent.investigator import Hypothesis
 from incident_agent.models import Incident
 from incident_agent.planner import InvestigationPlan, PlannedTask
 
@@ -15,7 +16,7 @@ class InvestigationState(TypedDict):
     pending_tasks: list[PlannedTask]
     completed_tasks: list[PlannedTask]
     evidence: list[ToolResult]
-    hypotheses: list[str]
+    hypotheses: list[Hypothesis]
     verification: str | None
     retry_count: int
     final_result: str | None

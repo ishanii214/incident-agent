@@ -1,12 +1,13 @@
-"""LangGraph investigation workflow with LLM planner and tool execution.
+"""LangGraph investigation workflow with planner, execution, hypotheses.
 
-The planner uses an LLM. execute_task deterministically dispatches validated
-tasks to read-only operational tools. Other nodes remain placeholders.
+The planner and investigator use an LLM. execute_task deterministically
+dispatches validated tasks. verify remains a placeholder.
 """
 
 from langgraph.graph import END, START, StateGraph
 
 from incident_agent.executor import execute_planned_task
+from incident_agent.investigator import run_investigator
 from incident_agent.planner import run_planner
 from incident_agent.state import InvestigationState
 
@@ -39,11 +40,11 @@ def collect_evidence(state: InvestigationState) -> dict:
     return {}
 
 
-def investigate(state: InvestigationState) -> dict:
-    """Create a generic placeholder hypothesis when evidence exists."""
-    if state["evidence"] and not state["hypotheses"]:
-        return {"hypotheses": ["placeholder-hypothesis-1"]}
-    return {}
+def investigate(state: InvestigationState, _investigator_fn=None) -> dict:  # type: ignore[no-untyped-def]
+    """Generate ranked unverified hypotheses from collected evidence."""
+    fn = _investigator_fn or run_investigator
+    out = fn(state["incident"], state["evidence"])
+    return {"hypotheses": list(out.hypotheses)}
 
 
 def verify(state: InvestigationState) -> dict:
@@ -53,7 +54,7 @@ def verify(state: InvestigationState) -> dict:
     return {"verification": "failed", "final_result": "skeleton-incomplete"}
 
 
-def build_graph(_planner_fn=None):  # type: ignore[no-untyped-def]
+def build_graph(_planner_fn=None, _investigator_fn=None):  # type: ignore[no-untyped-def]
     """Build and compile the linear investigation graph."""
     from functools import partial
 
@@ -62,7 +63,10 @@ def build_graph(_planner_fn=None):  # type: ignore[no-untyped-def]
     builder.add_node("planner", planner_node)
     builder.add_node("execute_task", execute_task)
     builder.add_node("collect_evidence", collect_evidence)
-    builder.add_node("investigate", investigate)
+    investigator_node = (
+        partial(investigate, _investigator_fn=_investigator_fn) if _investigator_fn else investigate
+    )
+    builder.add_node("investigate", investigator_node)
     builder.add_node("verify", verify)
     builder.add_edge(START, "planner")
     builder.add_edge("planner", "execute_task")
