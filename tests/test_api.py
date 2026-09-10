@@ -16,6 +16,7 @@ from incident_agent.executor import ToolResult
 from incident_agent.investigator import Hypothesis
 from incident_agent.models import MetricPoint
 from incident_agent.planner import PlannerValidationError
+from incident_agent.repository import InMemoryInvestigationRepository
 from incident_agent.verifier import VerificationResult
 
 
@@ -82,7 +83,15 @@ def fake_graph(monkeypatch):
 
 
 @pytest.fixture()
-def client():
+def repo(monkeypatch):
+    """Fresh repository per test so API tests never share stored records."""
+    repository = InMemoryInvestigationRepository()
+    monkeypatch.setattr(app_module, "repository", repository)
+    return repository
+
+
+@pytest.fixture()
+def client(repo):
     return TestClient(app_module.app)
 
 
@@ -183,3 +192,86 @@ def test_sequential_requests_have_independent_state(client, fake_graph):
     assert r1["incident"]["id"] != r2["incident"]["id"]
     assert len(fake_graph.calls) == 2
     assert fake_graph.calls[0]["incident"] is not fake_graph.calls[1]["incident"]
+
+
+def test_post_persists_result(client, repo, fake_graph):
+    resp = _post(client)
+    assert resp.status_code == 200
+    incident_id = resp.json()["incident"]["id"]
+    stored = repo.get(incident_id)
+    assert stored is not None
+    assert stored.incident.id == incident_id
+    assert stored.final_result == "verified"
+    assert len(stored.evidence) == 1
+
+
+def test_post_response_id_matches_get_id(client, fake_graph):
+    post_id = _post(client).json()["incident"]["id"]
+    detail = client.get(f"/incidents/{post_id}")
+    assert detail.status_code == 200
+    assert detail.json()["incident"]["id"] == post_id
+
+
+def test_get_detail_round_trip(client, fake_graph):
+    data = _post(client).json()
+    detail = client.get(f"/incidents/{data['incident']['id']}").json()
+    assert detail == data
+
+
+def test_get_list_contains_investigated_incident(client, fake_graph):
+    data = _post(client).json()
+    listing = client.get("/incidents")
+    assert listing.status_code == 200
+    items = listing.json()
+    assert len(items) == 1
+    assert items[0]["incident"]["id"] == data["incident"]["id"]
+    assert items[0]["incident"]["service"] == "checkout"
+    assert items[0]["final_result"] == "verified"
+    assert items[0]["verification_status"] == "PASS"
+
+
+def test_get_list_newest_first(client, fake_graph):
+    r1 = _post(client, service="checkout").json()
+    r2 = _post(client, service="search").json()
+    items = client.get("/incidents").json()
+    assert [item["incident"]["id"] for item in items] == [
+        r2["incident"]["id"],
+        r1["incident"]["id"],
+    ]
+
+
+def test_list_returns_summaries_only(client, fake_graph):
+    _post(client)
+    item = client.get("/incidents").json()[0]
+    assert set(item.keys()) == {"incident", "final_result", "verification_status"}
+
+
+def test_list_does_not_expose_internals(client, fake_graph):
+    _post(client)
+    item = client.get("/incidents").json()[0]
+    for forbidden in ("evidence", "hypotheses", "plan", "pending_tasks", "retry_count"):
+        assert forbidden not in item
+
+
+def test_unknown_id_returns_404(client):
+    resp = client.get("/incidents/inc-doesnotexist")
+    assert resp.status_code == 404
+    assert resp.json() == {"detail": "investigation not found"}
+
+
+def test_repository_isolation_between_requests(client, repo, fake_graph):
+    r1 = _post(client, service="checkout").json()
+    r2 = _post(client, service="search").json()
+    assert len(repo.list()) == 2
+    assert repo.get(r1["incident"]["id"]).incident.service == "checkout"
+    assert repo.get(r2["incident"]["id"]).incident.service == "search"
+
+
+def test_repository_deep_copy_semantics(client, repo, fake_graph):
+    data = _post(client).json()
+    fetched = repo.get(data["incident"]["id"])
+    fetched.final_result = "tampered"
+    fetched.incident.service = "tampered"
+    again = repo.get(data["incident"]["id"])
+    assert again.final_result == "verified"
+    assert again.incident.service == "checkout"

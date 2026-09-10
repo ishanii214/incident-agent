@@ -13,12 +13,18 @@ from pydantic import BaseModel, Field
 
 from incident_agent.executor import ToolResult, UnsupportedToolError
 from incident_agent.graph import graph
+from incident_agent.repository import InMemoryInvestigationRepository
 from incident_agent.investigator import Hypothesis, InvestigatorValidationError
 from incident_agent.models import Incident
 from incident_agent.planner import PlannerValidationError
 from incident_agent.verifier import VerifierValidationError, VerificationResult
 
 app = FastAPI(title="incident-agent")
+
+# Process-lifetime store for investigation results. Deliberately shared
+# across requests (it IS the product's memory in Phase 8); tests replace
+# it wholesale via monkeypatch.
+repository = InMemoryInvestigationRepository()
 
 _AGENT_BOUNDARY_ERRORS = (
     PlannerValidationError,
@@ -57,6 +63,14 @@ class InvestigationResponse(BaseModel):
     evidence: list[ToolResult]
 
 
+class InvestigationSummary(BaseModel):
+    """Listing projection of a stored investigation (no evidence/hypotheses)."""
+
+    incident: Incident
+    final_result: str | None
+    verification_status: str | None
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     """Health endpoint used for local checks and future readiness probes."""
@@ -90,7 +104,7 @@ def investigate_incident(request: InvestigateRequest) -> InvestigationResponse:
             status_code=502,
             detail="investigation reasoning component produced invalid output",
         ) from exc
-    return InvestigationResponse(
+    response = InvestigationResponse(
         incident=result["incident"],
         hypotheses=result["hypotheses"],
         verification=result["verification"],
@@ -98,3 +112,30 @@ def investigate_incident(request: InvestigateRequest) -> InvestigationResponse:
         retry_count=result["retry_count"],
         evidence=result["evidence"],
     )
+    # Persist the terminal result. Reached only after the try/except above,
+    # so agent-boundary failures (502) never persist a record. The caller
+    # gets the built response; the repository keeps its own deep copy.
+    repository.save(response)
+    return response
+
+
+@app.get("/incidents", response_model=list[InvestigationSummary])
+def list_investigations() -> list[InvestigationSummary]:
+    """List previously investigated incidents, newest first."""
+    return [
+        InvestigationSummary(
+            incident=record.incident,
+            final_result=record.final_result,
+            verification_status=record.verification.status if record.verification else None,
+        )
+        for record in repository.list()
+    ]
+
+
+@app.get("/incidents/{incident_id}", response_model=InvestigationResponse)
+def get_investigation(incident_id: str) -> InvestigationResponse:
+    """Retrieve one previously investigated incident by its incident id."""
+    record = repository.get(incident_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="investigation not found")
+    return record
