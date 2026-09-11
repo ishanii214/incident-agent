@@ -10,6 +10,7 @@ dependencies = [
   "pydantic>=2.6,<3",
   "langgraph>=1.1,<2",
   "langchain-ollama>=1.1,<2",
+  "psycopg[binary]>=3.2,<4",
 ]
 
 [project.optional-dependencies]
